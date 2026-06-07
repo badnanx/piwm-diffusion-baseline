@@ -11,12 +11,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from piwm_diffusion.autoencoder import PiwmConvVAE
 from piwm_diffusion.data import LunarTripletDataset, StateSpec
 from piwm_diffusion.dynamics import LunarSecondOrderDynamics
 from piwm_diffusion.physical import PhysicalAutoencoder
 from piwm_diffusion.plotting import plot_history_curves
-from piwm_diffusion.train_utils import device_from_arg, set_seed, write_json
+from piwm_diffusion.train_utils import device_from_arg, load_autoencoder, set_seed, write_json
 
 
 @torch.no_grad()
@@ -88,13 +87,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = device_from_arg(args.device)
 
-    ae_ckpt = torch.load(args.autoencoder_checkpoint, map_location=device, weights_only=False)
+    autoencoder, ae_ckpt = load_autoencoder(args.autoencoder_checkpoint, device)
     ae_args = ae_ckpt["args"]
-    autoencoder = PiwmConvVAE(latent_dim=int(ae_args["latent_dim"])).to(device)
-    autoencoder.load_state_dict(ae_ckpt["model_state_dict"])
-    autoencoder.eval()
-    for param in autoencoder.parameters():
-        param.requires_grad_(False)
 
     phys_ckpt = torch.load(args.physical_checkpoint, map_location=device, weights_only=False)
     phys_args = phys_ckpt["args"]

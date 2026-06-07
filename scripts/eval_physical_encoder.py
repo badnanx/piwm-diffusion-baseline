@@ -20,10 +20,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from piwm_diffusion.autoencoder import PiwmConvVAE
 from piwm_diffusion.crop import state_xy_to_pixel
 from piwm_diffusion.data import LunarFrameDataset, StateSpec
 from piwm_diffusion.physical import PhysicalAutoencoder
+from piwm_diffusion.train_utils import load_autoencoder
 
 
 def collect_predictions(autoencoder, physical_model, loader, state_indices, device):
@@ -143,12 +143,8 @@ def main():
         device = torch.device(args.device)
     print("device:", device)
 
-    # load autoencoder
-    ae_ckpt = torch.load(args.autoencoder_checkpoint, map_location=device, weights_only=False)
+    autoencoder, ae_ckpt = load_autoencoder(args.autoencoder_checkpoint, device)
     latent_dim = int(ae_ckpt["args"]["latent_dim"])
-    autoencoder = PiwmConvVAE(latent_dim=latent_dim).to(device)
-    autoencoder.load_state_dict(ae_ckpt["model_state_dict"])
-    autoencoder.eval()
 
     # load physical encoder
     phys_ckpt = torch.load(args.physical_checkpoint, map_location=device, weights_only=False)
