@@ -10,7 +10,7 @@ Compare two autoencoder paradigms in the same PIWM + latent diffusion pipeline. 
 | Paradigm B | VQ-VAE, no P1 | Done |
 | Paradigm B + P1 | VQ-VAE + P1 (z_pre supervision) | Done |
 | Paradigm A + P4 | A + compositional crop generation | Done |
-| Paradigm B + P4 | B+P1 + compositional crop generation | Pending |
+| Paradigm B + P4 | B+P1 + compositional crop generation | Done |
 
 ---
 
@@ -153,7 +153,7 @@ Purple smoke/streak. Same failure mode as A. P1 did not fix the rendering — it
 | A baseline crop_mse | 0.024 |
 | A deterministic_dp_crop_mse | 0.022 |
 
-P4 crop_mse (0.031) is slightly higher than the baseline DDPM (0.024). This is expected — previously the old lander ghost in the background was artificially helping the metric. With the erase step, the background is clean so the generated lander has to be correct on its own.
+P4 crop_mse (0.031) is higher than the baseline DDPM (0.024). The erase step is the correct fix (it removes the ghost lander from the background) but it also removes the metric crutch — the baseline DDPM's diffuse purple smear accidentally covered the true lander position most of the time, giving a low crop_mse without actually rendering a lander. P4 places a specific sprite at a specific predicted spot; when that spot is wrong the crop at the true position is black background, giving higher MSE.
 
 ### Visual Results
 
@@ -161,6 +161,7 @@ P4 crop_mse (0.031) is slightly higher than the baseline DDPM (0.024). This is e
 - CropDDPM generates recognizable lander body shapes with correct orientation (θ conditioning works)
 - Generated sprites are softer than real (VAE blur — expected at 16-dim latent)
 - Terrain sliver artifact fixed by tightening the color mask (white/grey terrain rejected since it has r ≈ g ≈ b)
+- Lander frequently misplaced, partially rendered, or absent — root cause is dynamics accuracy (dynamics_gt_mse 0.163), not the compositor
 
 ### Design Notes
 
@@ -168,9 +169,42 @@ P4 crop_mse (0.031) is slightly higher than the baseline DDPM (0.024). This is e
 
 **Why crop-based extraction instead of color extraction at training time:** CropVAE is trained on fixed 24×24 patches centered on the lander (via `crop_around_state`). This includes some background and occasional terrain pixels near the ground. Color-based extraction at training time would give cleaner sprites but requires retraining. The color paste mask is sufficient to prevent terrain from appearing in the composite.
 
+**The dynamics bottleneck:** P4 exposes what the full-frame DDPM hides. A diffuse smear across the whole image accidentally overlaps the true lander position — P4's precise placement cannot. Improving P4 visual quality requires improving dynamics accuracy first (more training data, more epochs, or conditioning on velocity in addition to position).
+
 **Remaining limitations:**
 - CropDDPM conditioned on θ only — not on y (height). Near-ground crops sometimes include terrain which can appear as a floating terrain sliver. Fix: condition on (θ, y).
 - Thruster fire (red dots) is filtered from the paste mask but not from CropVAE training — DDPM doesn't generate fire since it's not conditioned on action.
 - Background quality is limited by image_t (episode-specific terrain not generatable from physical state alone — would require SAM + per-frame background segmentation).
 
-**Next:** Paradigm B + P4 pending.
+---
+
+## Paradigm B + P4 — `outputs/laptop_vq_p1_v1`
+
+**Setup:** Same CropVAE + CropDDPM as A+P4 (identical architecture and training budget). Built on top of existing B+P1 checkpoint.
+
+### Results
+
+| Metric | Value |
+|---|---|
+| CropVAE best_loss | 0.00152 |
+| CropDDPM best_loss | 0.549 |
+| **B+P4 crop_mse** | **0.029** |
+| A+P4 crop_mse | 0.031 |
+| A baseline crop_mse | 0.024 |
+
+CropVAE and CropDDPM converged to identical losses as A+P4 — expected, since they are trained on the same data with the same architecture regardless of the upstream AE. The marginal crop_mse difference (0.029 vs 0.031) is within noise.
+
+### Key Takeaway
+
+**P4 quality is independent of which paradigm is underneath it.** The compositor output is driven by CropVAE/CropDDPM quality and dynamics position accuracy — not by whether the upstream AE is continuous or discrete. Both A+P4 and B+P4 produce similar crop_mse and similar visual artifacts (misplaced or missing lander).
+
+### Full Comparison Table
+
+| Method | crop_mse | Notes |
+|---|---|---|
+| A deterministic | 0.022 | Best metric — no sampling noise |
+| A baseline DDPM | 0.024 | Diffuse smear accidentally covers true position |
+| B+P4 compositor | 0.029 | Precise placement, exposed to dynamics error |
+| A+P4 compositor | 0.031 | Same |
+
+P4 scores worse than the baseline DDPM by crop_mse. This is the dynamics bottleneck: precise placement at a wrong position scores worse than a diffuse smear that accidentally overlaps the right area. P4 makes the dynamics bottleneck visible rather than hiding it.
