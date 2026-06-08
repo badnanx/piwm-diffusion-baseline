@@ -65,20 +65,47 @@ def load_crop_ddpm(ckpt_path, device):
     return model, schedule, ckpt
 
 
+def lander_pixel_mask(img, lander_threshold=0.08):
+    """
+    Boolean mask of lander pixels (purple body + red/orange thruster fire).
+    Purple: blue clearly dominates red and green (rejects white/grey terrain).
+    Red/orange: red clearly dominates blue and green.
+    img: (3, H, W) float tensor in [0, 1]. Returns (H, W) bool tensor.
+    """
+    r, g, b = img[0], img[1], img[2]
+    purple = (b > lander_threshold) & (b > g + 0.05) & (b > r + 0.05)
+    fire   = (r > lander_threshold) & (r > b + 0.05) & (r > g * 0.8)
+    return purple | fire
+
+
+def erase_lander(image, state, crop_size, lander_threshold=0.08):
+    """
+    Black out lander pixels in a region around the known state position.
+    image: (3, H, W). Returns (3, H, W) with lander zeroed out.
+    """
+    _, H, W = image.shape
+    fake_state = torch.zeros(1, 8, device=image.device)
+    fake_state[0, 0] = state[0]
+    fake_state[0, 1] = state[1]
+    px, py = state_xy_to_pixel(fake_state, H, W)
+    px, py = int(round(float(px[0]))), int(round(float(py[0])))
+
+    # Search window is 2x crop_size to catch the full lander including legs
+    half = crop_size
+    x0, y0 = max(0, px - half), max(0, py - half)
+    x1, y1 = min(W, px + half), min(H, py + half)
+
+    result = image.clone()
+    region = result[:, y0:y1, x0:x1]
+    mask = lander_pixel_mask(region, lander_threshold)
+    result[:, y0:y1, x0:x1] = region * (~mask).float()
+    return result
+
+
 def paste_crop(background, crop_img, px, py, crop_size, lander_threshold=0.08):
     """
-    Paste crop_img onto a copy of background at pixel (px, py).
-    Lander pixels selected by max(RGB) > threshold.
-
-    Args:
-        background: (3, H, W) float tensor
-        crop_img:   (3, crop_size, crop_size) float tensor
-        px, py:     float pixel center coords
-        crop_size:  int
-        lander_threshold: float
-
-    Returns:
-        composite: (3, H, W) float tensor
+    Paste crop_img onto background at pixel (px, py).
+    Uses color mask (purple + fire) to select lander pixels from the crop.
     """
     _, H, W = background.shape
     half = crop_size // 2
@@ -101,7 +128,7 @@ def paste_crop(background, crop_img, px, py, crop_size, lander_threshold=0.08):
 
     composite = background.clone()
     crop_region = crop_img[:, cy0:cy1, cx0:cx1]
-    mask = (crop_region.max(dim=0).values > lander_threshold).float().unsqueeze(0)
+    mask = lander_pixel_mask(crop_region, lander_threshold).float().unsqueeze(0)
     composite[:, iy0:iy1, ix0:ix1] = (
         mask * crop_region + (1.0 - mask) * background[:, iy0:iy1, ix0:ix1]
     )
@@ -170,80 +197,174 @@ def main():
         max_triplets_per_file=max_triplets,
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    # Separate shuffled loader for viz so samples aren't all from episode starts
+    viz_loader = DataLoader(
+        ds, batch_size=args.num_viz, shuffle=True, num_workers=0,
+        generator=torch.Generator().manual_seed(args.seed + 99),
+    )
 
     all_crop_mse = []
-    viz_rows = []
 
+    def run_batch(batch):
+        image_t  = batch["image_t"].to(device)
+        image_t1 = batch["image_t1"].to(device)
+        image_t2 = batch["image_t2"].to(device)
+        state_t  = batch["state_t"].to(device)
+        state_t2 = batch["state_t2"].to(device)
+        action   = batch["action_t1"].to(device)
+        B = image_t.size(0)
+        _, _, H, W = image_t.shape
+
+        z_t,  _ = autoencoder.encode(image_t)
+        z_t1, _ = autoencoder.encode(image_t1)
+        f_t,  _ = physical_model(z_t)
+        f_t1, _ = physical_model(z_t1)
+
+        f_t2_pred = dynamics(f_t, f_t1, action)
+
+        x_pred    = f_t2_pred[:, 0]
+        y_pred    = f_t2_pred[:, 1]
+        theta_pred = f_t2_pred[:, args.theta_f_index]
+
+        cond = theta_pred.unsqueeze(1)
+        crop_latent = sample_latents(crop_ddpm, crop_schedule, cond, crop_vae.latent_dim)
+        crop_imgs = crop_vae.decode(crop_latent)
+
+        fake_state = torch.zeros(B, 8, device=device)
+        fake_state[:, 0] = x_pred
+        fake_state[:, 1] = y_pred
+        px_batch, py_batch = state_xy_to_pixel(fake_state, H, W)
+
+        composites = []
+        for i in range(B):
+            bg = erase_lander(image_t[i], state_t[i], args.crop_size, args.lander_threshold)
+            comp = paste_crop(
+                bg, crop_imgs[i],
+                px_batch[i], py_batch[i],
+                args.crop_size, args.lander_threshold,
+            )
+            composites.append(comp)
+        composites = torch.stack(composites)
+
+        comp_crop = crop_around_state(composites, state_t2, crop_size=args.crop_size)
+        real_crop = crop_around_state(image_t2, state_t2, crop_size=args.crop_size)
+        crop_mse = F.mse_loss(comp_crop, real_crop, reduction="none").mean(dim=[1, 2, 3])
+
+        return {
+            "image_t": image_t, "image_t2": image_t2, "state_t2": state_t2,
+            "composites": composites, "crop_imgs": crop_imgs,
+            "comp_crop": comp_crop, "real_crop": real_crop,
+            "crop_mse": crop_mse,
+        }
+
+    # Full metrics pass (shuffled=False for reproducibility)
     with torch.no_grad():
         for batch in loader:
-            image_t  = batch["image_t"].to(device)
-            image_t1 = batch["image_t1"].to(device)
-            image_t2 = batch["image_t2"].to(device)
-            state_t2 = batch["state_t2"].to(device)
-            action   = batch["action_t1"].to(device)
-            B = image_t.size(0)
-            _, _, H, W = image_t.shape
+            out = run_batch(batch)
+            all_crop_mse.extend(out["crop_mse"].cpu().tolist())
 
-            # Encode to latents then physical features
-            z_t,  _ = autoencoder.encode(image_t)
-            z_t1, _ = autoencoder.encode(image_t1)
-            f_t,  _ = physical_model(z_t)
-            f_t1, _ = physical_model(z_t1)
-
-            # Predict next physical state
-            f_t2_pred = dynamics(f_t, f_t1, action)
-
-            # x, y are the first two dims of f (state_indices[0] and [1])
-            x_pred = f_t2_pred[:, 0]
-            y_pred = f_t2_pred[:, 1]
-            theta_pred = f_t2_pred[:, args.theta_f_index]
-
-            # Sample crop from DDPM conditioned on theta
-            cond = theta_pred.unsqueeze(1)
-            crop_latent = sample_latents(crop_ddpm, crop_schedule, cond, crop_vae.latent_dim)
-            crop_imgs = crop_vae.decode(crop_latent)
-
-            # Convert predicted (x, y) to pixel coordinates
-            fake_state = torch.zeros(B, 8, device=device)
-            fake_state[:, 0] = x_pred
-            fake_state[:, 1] = y_pred
-            px_batch, py_batch = state_xy_to_pixel(fake_state, H, W)
-
-            # Compose: paste crop onto background (image_t)
-            composites = []
-            for i in range(B):
-                comp = paste_crop(
-                    image_t[i], crop_imgs[i],
-                    px_batch[i], py_batch[i],
-                    args.crop_size, args.lander_threshold,
-                )
-                composites.append(comp)
-            composites = torch.stack(composites)
-
-            # Crop MSE between composite and real next frame, both cropped around true next state
-            comp_crop = crop_around_state(composites, state_t2, crop_size=args.crop_size)
-            real_crop = crop_around_state(image_t2, state_t2, crop_size=args.crop_size)
-            crop_mse = F.mse_loss(comp_crop, real_crop, reduction="none").mean(dim=[1, 2, 3])
-            all_crop_mse.extend(crop_mse.cpu().tolist())
-
-            if len(viz_rows) < args.num_viz:
-                for i in range(min(B, args.num_viz - len(viz_rows))):
-                    viz_rows.append({
-                        "real": image_t2[i].cpu(),
-                        "generated": composites[i].cpu(),
-                        "crop_mse": crop_mse[i].item(),
-                    })
+    # Viz pass — one shuffled batch
+    with torch.no_grad():
+        viz_batch = next(iter(viz_loader))
+        viz_out = run_batch(viz_batch)
 
     mean_crop_mse = float(np.mean(all_crop_mse))
     print(f"crop_mse mean: {mean_crop_mse:.6f}  n={len(all_crop_mse)}")
 
+    # 1. Full frame: real t2 vs composite
+    viz_rows = [
+        {
+            "real": viz_out["image_t2"][i].cpu(),
+            "generated": viz_out["composites"][i].cpu(),
+            "crop_mse": viz_out["crop_mse"][i].item(),
+        }
+        for i in range(viz_out["image_t2"].size(0))
+    ]
     _save_comparison_grid(
         viz_rows,
         os.path.join(args.output_dir, "p4_rollout_real_vs_generated.png"),
     )
 
+    # 2. Crop-only grid: generated crop vs real crop at true next position
+    _save_crop_grid(
+        viz_out["comp_crop"].cpu(),
+        viz_out["real_crop"].cpu(),
+        os.path.join(args.output_dir, "p4_crop_generated_vs_real.png"),
+    )
+
+    # 3. Component view: background | generated crop | composite | real t2
+    _save_component_grid(
+        viz_out["image_t"].cpu(),
+        viz_out["crop_imgs"].cpu(),
+        viz_out["composites"].cpu(),
+        viz_out["image_t2"].cpu(),
+        os.path.join(args.output_dir, "p4_components.png"),
+    )
+
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
         json.dump({"mean_crop_mse": mean_crop_mse, "n": len(all_crop_mse)}, f, indent=2)
+
+
+def _save_crop_grid(gen_crops, real_crops, path, ncols=8):
+    """Side-by-side 24x24 crop comparison: generated (top) vs real (bottom)."""
+    n = gen_crops.size(0)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows * 2, ncols, figsize=(ncols * 1.5, nrows * 3))
+    axes = np.array(axes).reshape(nrows * 2, ncols)
+    for idx in range(n):
+        r = (idx // ncols) * 2
+        c = idx % ncols
+        axes[r,     c].imshow(gen_crops[idx].permute(1, 2, 0).clamp(0, 1).numpy())
+        axes[r,     c].set_title("gen", fontsize=6)
+        axes[r,     c].axis("off")
+        axes[r + 1, c].imshow(real_crops[idx].permute(1, 2, 0).clamp(0, 1).numpy())
+        axes[r + 1, c].set_title("real", fontsize=6)
+        axes[r + 1, c].axis("off")
+    for idx in range(n, nrows * ncols):
+        r = (idx // ncols) * 2
+        c = idx % ncols
+        axes[r, c].axis("off")
+        axes[r + 1, c].axis("off")
+    plt.suptitle("CropDDPM generated (top) vs real (bottom) at true lander position", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved {path}")
+
+
+def _save_component_grid(backgrounds, crop_imgs, composites, reals, path, ncols=4):
+    """4-panel per example: background | generated crop (upscaled) | composite | real t2."""
+    n = backgrounds.size(0)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows * 4, ncols, figsize=(ncols * 3, nrows * 12))
+    axes = np.array(axes).reshape(nrows * 4, ncols)
+    H, W = backgrounds.shape[2], backgrounds.shape[3]
+    for idx in range(n):
+        r = (idx // ncols) * 4
+        c = idx % ncols
+        # Upscale crop to full frame size for display
+        crop_up = F.interpolate(crop_imgs[idx:idx+1], size=(H, W), mode="nearest")[0]
+        axes[r,     c].imshow(backgrounds[idx].permute(1, 2, 0).clamp(0, 1).numpy())
+        axes[r,     c].set_title("background (t)", fontsize=6)
+        axes[r,     c].axis("off")
+        axes[r + 1, c].imshow(crop_up.permute(1, 2, 0).clamp(0, 1).numpy())
+        axes[r + 1, c].set_title("generated crop", fontsize=6)
+        axes[r + 1, c].axis("off")
+        axes[r + 2, c].imshow(composites[idx].permute(1, 2, 0).clamp(0, 1).numpy())
+        axes[r + 2, c].set_title("composite", fontsize=6)
+        axes[r + 2, c].axis("off")
+        axes[r + 3, c].imshow(reals[idx].permute(1, 2, 0).clamp(0, 1).numpy())
+        axes[r + 3, c].set_title("real (t+2)", fontsize=6)
+        axes[r + 3, c].axis("off")
+    for idx in range(n, nrows * ncols):
+        r = (idx // ncols) * 4
+        c = idx % ncols
+        for dr in range(4):
+            axes[r + dr, c].axis("off")
+    plt.tight_layout()
+    plt.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved {path}")
 
 
 def _save_comparison_grid(viz_rows, path, ncols=4):

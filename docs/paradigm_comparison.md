@@ -9,7 +9,7 @@ Compare two autoencoder paradigms in the same PIWM + latent diffusion pipeline. 
 | Paradigm A | Continuous VAE + P1 (state supervision) | Done |
 | Paradigm B | VQ-VAE, no P1 | Done |
 | Paradigm B + P1 | VQ-VAE + P1 (z_pre supervision) | Done |
-| Paradigm A + P4 | A + compositional crop generation | Pending |
+| Paradigm A + P4 | A + compositional crop generation | Done |
 | Paradigm B + P4 | B+P1 + compositional crop generation | Pending |
 
 ---
@@ -133,19 +133,44 @@ Purple smoke/streak. Same failure mode as A. P1 did not fix the rendering — it
 
 ---
 
-## Next Steps: P4 Compositional Generation
+## Paradigm A + P4 — `outputs/laptop_p1_xyt_v1`
 
-P4 replaces full-frame DDPM generation with a two-part compositor:
+**Setup:** CropVAE (24×24 → 16-dim, 20 epochs), CropDDPM (conditioned on θ, 20 epochs). Built on top of existing Paradigm A checkpoint.
 
-1. **Background:** copy `image_t` directly (no generation needed)
-2. **Lander crop:** train a tiny CropVAE (24×24 → 16-dim) and a crop-only DDPM conditioned on θ
-3. **Compositor:** decode crop latent → paste at predicted pixel (x, y) using a lander mask (threshold max RGB > 0.08)
+### P4 Pipeline
 
-All scripts are implemented (`train_crop_ae.py`, `export_crop_latents.py`, `train_crop_ddpm.py`, `eval_p4_compositor.py`). Run on top of existing A checkpoint:
+1. **Background:** copy `image_t`, erase lander at known position using color mask (purple: b > r+0.05 and b > g+0.05; fire: r > b+0.05)
+2. **Lander crop:** CropDDPM samples 16-dim latent conditioned on predicted θ → CropVAE decodes to 24×24 sprite
+3. **Compositor:** paste sprite at predicted pixel (x, y) using same color mask, rejecting background/terrain pixels from the generated crop
 
-```bash
-make PYTHON=.venv/bin/python RUN_DIR=outputs/laptop_p1_xyt_v1 \
-  crop-ae export-crop-latents crop-ddpm p4-eval
-```
+### Results
 
-P4 is expected to fix the lander rendering problem since it sidesteps the "generate full frame from 3 numbers" bottleneck.
+| Metric | Value |
+|---|---|
+| CropVAE best_loss | 0.00152 |
+| CropDDPM best_loss | 0.549 |
+| **P4 crop_mse** | **0.031** |
+| A baseline crop_mse | 0.024 |
+| A deterministic_dp_crop_mse | 0.022 |
+
+P4 crop_mse (0.031) is slightly higher than the baseline DDPM (0.024). This is expected — previously the old lander ghost in the background was artificially helping the metric. With the erase step, the background is clean so the generated lander has to be correct on its own.
+
+### Visual Results
+
+- Double-lander problem resolved by the erase step
+- CropDDPM generates recognizable lander body shapes with correct orientation (θ conditioning works)
+- Generated sprites are softer than real (VAE blur — expected at 16-dim latent)
+- Terrain sliver artifact fixed by tightening the color mask (white/grey terrain rejected since it has r ≈ g ≈ b)
+
+### Design Notes
+
+**Why color mask instead of SAM:** Lunar Lander's purple lander is uniquely colored against a black sky. Color threshold (`b > r+0.05, b > g+0.05`) reliably segments the lander and rejects terrain. SAM would add 2-3 sessions of implementation for marginal gain on a synthetic environment where we already have position priors from state.
+
+**Why crop-based extraction instead of color extraction at training time:** CropVAE is trained on fixed 24×24 patches centered on the lander (via `crop_around_state`). This includes some background and occasional terrain pixels near the ground. Color-based extraction at training time would give cleaner sprites but requires retraining. The color paste mask is sufficient to prevent terrain from appearing in the composite.
+
+**Remaining limitations:**
+- CropDDPM conditioned on θ only — not on y (height). Near-ground crops sometimes include terrain which can appear as a floating terrain sliver. Fix: condition on (θ, y).
+- Thruster fire (red dots) is filtered from the paste mask but not from CropVAE training — DDPM doesn't generate fire since it's not conditioned on action.
+- Background quality is limited by image_t (episode-specific terrain not generatable from physical state alone — would require SAM + per-frame background segmentation).
+
+**Next:** Paradigm B + P4 pending.
