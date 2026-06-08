@@ -22,6 +22,7 @@ STATE_WEIGHT ?= 1.0
 CROP_WEIGHT ?= 1.0
 CROP_SIZE ?= 24
 CROP_LATENT_DIM ?= 16
+CROP_EPOCHS ?= 20
 CROP_DDPM_HIDDEN ?= 128
 CROP_DDPM_LAYERS ?= 3
 CROP_DDPM_STEPS ?= 15
@@ -253,7 +254,7 @@ crop-ae:
 	  --output_dir $(RUN_DIR)/crop_ae \
 	  --latent_dim $(CROP_LATENT_DIM) \
 	  --crop_size $(CROP_SIZE) \
-	  --epochs $(EPOCHS) \
+	  --epochs $(CROP_EPOCHS) \
 	  --batch_size $(AE_BATCH) \
 	  --max_train_files $(TRAIN_FILES) \
 	  --max_test_files $(TEST_FILES) \
@@ -282,7 +283,7 @@ crop-ddpm:
 	  --train_npz $(RUN_DIR)/crop_latents_train.npz \
 	  --val_npz $(RUN_DIR)/crop_latents_test.npz \
 	  --output_dir $(RUN_DIR)/crop_ddpm \
-	  --epochs $(EPOCHS) \
+	  --epochs $(CROP_EPOCHS) \
 	  --batch_size $(DDPM_BATCH) \
 	  --hidden_dim $(CROP_DDPM_HIDDEN) \
 	  --num_layers $(CROP_DDPM_LAYERS) \
