@@ -57,15 +57,21 @@ Planned: temporal smoothness loss `L_smooth = Σ||f_t - 2f_{t+1} + f_{t+2}||²`,
 
 ### P4 — Compositional Output Generation
 
-The DDPM currently generates full 100×150 frames from 3 condition numbers. This makes lander placement imprecise because the decoder has to place the lander based on a noisy latent rather than explicit coordinates.
+Implemented. A separate CropVAE + CropDDPM generates the lander sprite; the compositor pastes it at the dynamics-predicted position onto a background copied from `image_t`.
 
-Planned P4 approach:
-1. Train a separate 24×24 crop AE on lander patches
-2. Train a DDPM conditioned on θ to generate crop latents
-3. Use (x, y) from the dynamics model to place the crop in pixel space
-4. Composite onto a copied background frame
+**Pipeline:**
+1. **Background:** copy `image_t`, erase lander using color mask (purple: `b > r+0.05` and `b > g+0.05`; fire: `r > b+0.05`)
+2. **Lander sprite:** CropDDPM samples a 16-dim latent conditioned on predicted θ → CropVAE decodes to 24×24 patch
+3. **Compositor:** paste sprite at predicted pixel (x, y), rejecting non-lander pixels from the generated crop via color mask
 
-**Status: planned**
+**Known limitations:**
+- CropDDPM conditioned on θ only, not y. This affects the output in two ways: (1) near-ground crops include terrain pixels; (2) at high y (start of episode), the lander is partially or fully offscreen — the 24×24 crop clips the image edge, so CropVAE learned partially-black sprites for those states. Fix: condition on (θ, y).
+- Background is copied from `image_t` — episode-specific terrain cannot be generated from physical state alone.
+- Positioning accuracy is bounded by dynamics accuracy (30–52px error on a 100×150px image).
+
+**Make targets:** `crop-ae export-crop-latents crop-ddpm p4-eval`
+
+**Status: implemented** (evaluated on both Paradigm A and B+P1 — see [paradigm_comparison.md](paradigm_comparison.md))
 
 ## Loss Functions
 
