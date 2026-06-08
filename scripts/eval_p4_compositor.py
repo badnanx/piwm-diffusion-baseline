@@ -78,6 +78,19 @@ def lander_pixel_mask(img, lander_threshold=0.08):
     return purple | fire
 
 
+def extract_lander_centroid(img, lander_threshold=0.08, min_pixels=5):
+    """
+    Extract lander centroid in pixel coords via color mask.
+    img: (3, H, W) float tensor in [0, 1].
+    Returns (cx, cy) floats, or (None, None) if fewer than min_pixels detected.
+    """
+    mask = lander_pixel_mask(img, lander_threshold)
+    if mask.sum() < min_pixels:
+        return None, None
+    ys, xs = torch.where(mask)
+    return xs.float().mean().item(), ys.float().mean().item()
+
+
 def erase_lander(image, state, crop_size, lander_threshold=0.08):
     """
     Black out lander pixels in a region around the known state position.
@@ -204,6 +217,9 @@ def main():
     )
 
     all_crop_mse = []
+    all_detected = []
+    all_err_vs_pred = []
+    all_err_vs_true = []
 
     def run_batch(batch):
         image_t  = batch["image_t"].to(device)
@@ -250,11 +266,27 @@ def main():
         real_crop = crop_around_state(image_t2, state_t2, crop_size=args.crop_size)
         crop_mse = F.mse_loss(comp_crop, real_crop, reduction="none").mean(dim=[1, 2, 3])
 
+        # Constraint checker: extract lander centroid from each composite,
+        # compare to predicted position (from dynamics) and true position (from state_t2)
+        true_state = torch.zeros(B, 8, device=device)
+        true_state[:, 0] = state_t2[:, 0]
+        true_state[:, 1] = state_t2[:, 1]
+        px_true, py_true = state_xy_to_pixel(true_state, H, W)
+
+        detected, err_vs_pred, err_vs_true = [], [], []
+        for i in range(B):
+            cx, cy = extract_lander_centroid(composites[i], args.lander_threshold)
+            detected.append(cx is not None)
+            if cx is not None:
+                err_vs_pred.append(np.sqrt((cx - float(px_batch[i]))**2 + (cy - float(py_batch[i]))**2))
+                err_vs_true.append(np.sqrt((cx - float(px_true[i]))**2 + (cy - float(py_true[i]))**2))
+
         return {
             "image_t": image_t, "image_t2": image_t2, "state_t2": state_t2,
             "composites": composites, "crop_imgs": crop_imgs,
             "comp_crop": comp_crop, "real_crop": real_crop,
             "crop_mse": crop_mse,
+            "detected": detected, "err_vs_pred": err_vs_pred, "err_vs_true": err_vs_true,
         }
 
     # Full metrics pass (shuffled=False for reproducibility)
@@ -262,6 +294,9 @@ def main():
         for batch in loader:
             out = run_batch(batch)
             all_crop_mse.extend(out["crop_mse"].cpu().tolist())
+            all_detected.extend(out["detected"])
+            all_err_vs_pred.extend(out["err_vs_pred"])
+            all_err_vs_true.extend(out["err_vs_true"])
 
     # Viz pass — one shuffled batch
     with torch.no_grad():
@@ -269,7 +304,15 @@ def main():
         viz_out = run_batch(viz_batch)
 
     mean_crop_mse = float(np.mean(all_crop_mse))
+    detection_rate = float(np.mean(all_detected))
+    mean_err_vs_pred = float(np.mean(all_err_vs_pred)) if all_err_vs_pred else float("nan")
+    mean_err_vs_true = float(np.mean(all_err_vs_true)) if all_err_vs_true else float("nan")
+    n_detected = sum(all_detected)
+
     print(f"crop_mse mean: {mean_crop_mse:.6f}  n={len(all_crop_mse)}")
+    print(f"detection_rate: {detection_rate:.3f}  ({n_detected}/{len(all_detected)} frames)")
+    print(f"centroid_err_vs_pred: {mean_err_vs_pred:.1f} px  (dynamics position accuracy)")
+    print(f"centroid_err_vs_true: {mean_err_vs_true:.1f} px  (end-to-end position accuracy)")
 
     # 1. Full frame: real t2 vs composite
     viz_rows = [
@@ -302,7 +345,14 @@ def main():
     )
 
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
-        json.dump({"mean_crop_mse": mean_crop_mse, "n": len(all_crop_mse)}, f, indent=2)
+        json.dump({
+            "mean_crop_mse": mean_crop_mse,
+            "n": len(all_crop_mse),
+            "detection_rate": detection_rate,
+            "n_detected": n_detected,
+            "centroid_err_vs_pred_px": mean_err_vs_pred,
+            "centroid_err_vs_true_px": mean_err_vs_true,
+        }, f, indent=2)
 
 
 def _save_crop_grid(gen_crops, real_crops, path, ncols=8):

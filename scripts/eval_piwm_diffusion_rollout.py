@@ -11,13 +11,28 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from piwm_diffusion.crop import crop_around_state
+from piwm_diffusion.crop import crop_around_state, state_xy_to_pixel
 from piwm_diffusion.data import LunarTripletDataset
 from piwm_diffusion.diffusion import ConditionalDenoiserMLP, DiffusionSchedule, sample_latents
 from piwm_diffusion.dynamics import LunarSecondOrderDynamics
 from piwm_diffusion.physical import PhysicalAutoencoder
 from piwm_diffusion.train_utils import device_from_arg, load_autoencoder, set_seed, write_json
 from piwm_diffusion.viz import save_reconstruction_grid
+
+
+def lander_pixel_mask(img, lander_threshold=0.08):
+    r, g, b = img[0], img[1], img[2]
+    purple = (b > lander_threshold) & (b > g + 0.05) & (b > r + 0.05)
+    fire   = (r > lander_threshold) & (r > b + 0.05) & (r > g * 0.8)
+    return purple | fire
+
+
+def extract_lander_centroid(img, lander_threshold=0.08, min_pixels=5):
+    mask = lander_pixel_mask(img, lander_threshold)
+    if mask.sum() < min_pixels:
+        return None, None
+    ys, xs = torch.where(mask)
+    return xs.float().mean().item(), ys.float().mean().item()
 
 
 @torch.no_grad()
@@ -121,6 +136,9 @@ def main():
         "generated_crop_mse": [],
         "deterministic_dp_crop_mse": [],
     }
+    cc_detected = []
+    cc_err_vs_pred = []
+    cc_err_vs_true = []
     all_real = []
     all_generated = []
 
@@ -161,6 +179,29 @@ def main():
                 F.mse_loss(crop_around_state(image_dp, f_xy), crop_around_state(image_t2, f_xy)).item()
             )
 
+            # Constraint checker: extract lander centroid from generated image,
+            # compare to predicted and true positions.
+            # NOTE: detects purple pixels only — baseline DDPM produces a diffuse
+            # smear, not a shaped lander, so these numbers are not directly
+            # comparable to P4 compositor results.
+            _, _, H, W = image_gen.shape
+            pred_state = torch.zeros(image_gen.size(0), 8, device=device)
+            pred_state[:, 0] = f_pred[:, xi]
+            pred_state[:, 1] = f_pred[:, yi]
+            px_pred, py_pred = state_xy_to_pixel(pred_state, H, W)
+
+            true_state = torch.zeros(image_gen.size(0), 8, device=device)
+            true_state[:, 0] = gt_f2[:, xi]
+            true_state[:, 1] = gt_f2[:, yi]
+            px_true, py_true = state_xy_to_pixel(true_state, H, W)
+
+            for i in range(image_gen.size(0)):
+                cx, cy = extract_lander_centroid(image_gen[i], min_pixels=5)
+                cc_detected.append(cx is not None)
+                if cx is not None:
+                    cc_err_vs_pred.append(np.sqrt((cx - float(px_pred[i]))**2 + (cy - float(py_pred[i]))**2))
+                    cc_err_vs_true.append(np.sqrt((cx - float(px_true[i]))**2 + (cy - float(py_true[i]))**2))
+
         all_real.append(image_t2)
         all_generated.append(image_gen)
 
@@ -179,6 +220,11 @@ def main():
         key: float(np.mean(values)) if values else None
         for key, values in metrics.items()
     }
+    if cc_detected:
+        summary["constraint_detection_rate"] = float(np.mean(cc_detected))
+        summary["constraint_centroid_err_vs_pred_px"] = float(np.mean(cc_err_vs_pred)) if cc_err_vs_pred else float("nan")
+        summary["constraint_centroid_err_vs_true_px"] = float(np.mean(cc_err_vs_true)) if cc_err_vs_true else float("nan")
+        summary["constraint_n_detected"] = int(sum(cc_detected))
     summary.update(
         {
             "num_triplets": len(ds),
