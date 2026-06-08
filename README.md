@@ -2,7 +2,7 @@
 
 A staged, extrinsic PIWM + latent diffusion baseline for Lunar Lander image generation.
 
-The goal is to compare two autoencoder paradigms (continuous VAE vs VQ-VAE) under the same PIWM-aligned training setup, and eventually add P4 compositional generation to both.
+Compares two autoencoder paradigms (continuous VAE vs VQ-VAE) under the same PIWM-aligned training setup, with P4 compositional generation (separate lander crop + background) evaluated on both. See [docs/paradigm_comparison.md](docs/paradigm_comparison.md) for full results.
 
 See [docs/](docs/) for architecture details and results.
 
@@ -54,6 +54,15 @@ The pipeline prints a stage header as each step starts:
 === STAGE 9/9: Rollout Eval (real vs generated, crop-MSE) ===
 ```
 
+### P4 Compositor (on top of an existing run)
+
+```bash
+make crop-ae export-crop-latents crop-ddpm p4-eval \
+  RUN_DIR=outputs/paradigm_a_v1 CROP_EPOCHS=20 DEVICE=cuda
+```
+
+This adds CropVAE + CropDDPM + compositor eval to any existing AE/physical/dynamics checkpoint.
+
 ### Re-running individual stages
 
 ```bash
@@ -72,9 +81,13 @@ After a full run, inspect:
 | `*/dynamics_eval/overlay.png` | True (green) vs predicted (red) lander position |
 | `*/random_samples/samples.png` | Conditional diffusion samples |
 | `*/rollout/rollout_real_vs_generated.png` | Real future frame vs PIWM+DDPM generated |
-| `*/rollout/summary.json` | Crop-MSE and image-MSE metrics |
+| `*/rollout/summary.json` | Crop-MSE, image-MSE, and constraint checker metrics |
+| `*/crop_ae/recon_best.png` | CropVAE lander patch reconstructions |
+| `*/p4_eval/p4_components.png` | 4-panel: background / generated crop / composite / real |
+| `*/p4_eval/p4_rollout_real_vs_generated.png` | Real vs P4 composite full frame |
+| `*/p4_eval/metrics.json` | P4 crop-MSE and constraint checker (centroid error, detection rate) |
 
-The key metric for lander quality is `generated_crop_mse` vs `deterministic_dp_crop_mse` in `rollout/summary.json`.
+Key metrics: `generated_crop_mse` in `rollout/summary.json` for baseline quality; `centroid_err_vs_true_px` in `p4_eval/metrics.json` and `rollout/summary.json` for physical positioning accuracy.
 
 ## Makefile Variables
 
@@ -91,6 +104,7 @@ The key metric for lander quality is `generated_crop_mse` vs `deterministic_dp_c
 | `STATE_WEIGHT` | `1.0` | P1 partitioning strength |
 | `CROP_WEIGHT` | `1.0` | Lander crop loss weight |
 | `CROP_SIZE` | `24` | Crop size in pixels |
+| `CROP_EPOCHS` | `20` | Epochs for CropVAE and CropDDPM (separate from `EPOCHS`) |
 
 ## Architecture Overview
 
