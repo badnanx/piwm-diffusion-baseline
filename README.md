@@ -54,6 +54,33 @@ The pipeline prints a stage header as each step starts:
 === STAGE 9/9: Rollout Eval (real vs generated, crop-MSE) ===
 ```
 
+### Paradigm A — SegmentVAE + visible filter (recommended)
+
+```bash
+make full-segment \
+  RUN_DIR=outputs/paradigm_a_visible_v1 \
+  TRAIN_FILES=40 TEST_FILES=10 EPOCHS=20 SPRITE_EPOCHS=20 \
+  DEVICE=cuda REQUIRE_VISIBLE=1
+```
+
+This runs the full pipeline: AE → physical encoder → dynamics → SpriteVAE → SpriteDDPM → rollout eval. Only frames where the lander is fully on-screen are used throughout.
+
+#### Constraint-guided eval
+
+Run the rollout with the constraint gradient nudge (diffusion actively satisfies C rather than having it trivially satisfied by compositing):
+
+```bash
+make segment-rollout \
+  RUN_DIR=outputs/paradigm_a_visible_v1 \
+  SPRITE_CONSTRAINT_ALPHA=0.05 DEVICE=cuda REQUIRE_VISIBLE=1
+```
+
+Output goes to `segment_rollout_constrained_a0.05/`. Compare all variants with:
+
+```bash
+python scripts/compare_rollout_runs.py --run_dir outputs/paradigm_a_visible_v1
+```
+
 ### P4 Compositor (on top of an existing run)
 
 ```bash
@@ -86,8 +113,12 @@ After a full run, inspect:
 | `*/p4_eval/p4_components.png` | 4-panel: background / generated crop / composite / real |
 | `*/p4_eval/p4_rollout_real_vs_generated.png` | Real vs P4 composite full frame |
 | `*/p4_eval/metrics.json` | P4 crop-MSE and constraint checker (centroid error, detection rate) |
+| `*/segment_ae/recon_best.png` | SpriteVAE 32×32 lander reconstructions |
+| `*/segment_rollout/segment_rollout_comparison.png` | 3-row grid: real / background / composite |
+| `*/segment_rollout/summary.json` | All constraint metrics including centroid error and detection rate |
+| `*/segment_rollout_constrained_a*/summary.json` | Same with constraint-guided SDEdit active |
 
-Key metrics: `generated_crop_mse` in `rollout/summary.json` for baseline quality; `centroid_err_vs_true_px` in `p4_eval/metrics.json` and `rollout/summary.json` for physical positioning accuracy.
+Key metrics: `composite_crop_mse` vs `deterministic_crop_mse` in `segment_rollout/summary.json` — how much diffusion adds over the mean sprite; `constraint_centroid_err_vs_true_px` for positioning accuracy.
 
 ## Makefile Variables
 
@@ -105,6 +136,10 @@ Key metrics: `generated_crop_mse` in `rollout/summary.json` for baseline quality
 | `CROP_WEIGHT` | `1.0` | Lander crop loss weight |
 | `CROP_SIZE` | `24` | Crop size in pixels |
 | `CROP_EPOCHS` | `20` | Epochs for CropVAE and CropDDPM (separate from `EPOCHS`) |
+| `REQUIRE_VISIBLE` | `0` | Set `1` to filter off-screen frames throughout all stages |
+| `SPRITE_SDEDIT_T_START` | `7` | SDEdit noise level for sprite temporal continuity |
+| `SPRITE_CONSTRAINT_ALPHA` | `0.0` | Gradient step size for constraint-guided SDEdit (0 = off) |
+| `SPRITE_CONSTRAINT_STEPS` | `1` | Gradient steps per denoising step when constraint active |
 
 ## Architecture Overview
 

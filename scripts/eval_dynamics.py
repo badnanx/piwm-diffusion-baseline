@@ -148,6 +148,8 @@ def main():
                         help="number of frames to show in the overlay grid")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--require_visible", action="store_true",
+                        help="Only eval on triplets where lander is fully on-screen")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -186,7 +188,8 @@ def main():
     print(f"state variables: {list(zip(state_indices, state_names))}")
 
     state_idx_tensor = torch.tensor(state_indices, dtype=torch.long)
-    ds = LunarTripletDataset(args.test_dir, max_files=args.max_test_files)
+    ds = LunarTripletDataset(args.test_dir, max_files=args.max_test_files,
+                             require_visible=args.require_visible)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
     print(f"test triplets: {len(ds)}")
 

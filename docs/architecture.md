@@ -73,6 +73,49 @@ Implemented. A separate CropVAE + CropDDPM generates the lander sprite; the comp
 
 **Status: implemented** (evaluated on both Paradigm A and B+P1 — see [paradigm_comparison.md](paradigm_comparison.md))
 
+### SegmentVAE Pipeline (Paradigm A + visible filter)
+
+A revised P4-inspired compositor that keeps a strict visibility contract throughout training and eval and adds constraint-guided generation.
+
+**Visibility filter** — frames where the lander has fewer than 30 purple pixels or whose bounding box touches the image edge are excluded from all stages: AE, physical encoder, dynamics, SpriteVAE, SpriteDDPM, rollout. This prevents off-screen positions from corrupting the physical encoder (which caused y R²=−0.97 without the filter).
+
+**SpriteVAE** — encodes/decodes 32×32 lander sprites into 16-dim z_sprite. Trained on sprites extracted from visible frames via color mask. Separate from the full-frame AE.
+
+**SpriteDDPM** — denoising diffusion model over z_sprite, conditioned on predicted θ (normalized). 50 denoising steps.
+
+**SDEdit** — for temporal continuity, encode the current frame's sprite → z0, forward-diffuse to t_start=7, then reverse-denoise conditioned on θ_pred. This seeds generation from the current lander shape rather than pure noise.
+
+**Compositing** — clean background from image_t1 (zero all purple pixels), decode z_sprite → 32×32 sprite, paste centered at pixel(x_pred, y_pred) from dynamics.
+
+**Constraint checker C(y, f)**
+
+Physical consistency: detected position in the generated image should match the predicted physical state. Implemented via hard color mask:
+
+```
+centroid(y) = mean pixel of { p : b > r+0.051, b > g+0.051, b > 0.10 }
+C(y, f)     = || centroid(y) - pixel_coords(f_pred_x, f_pred_y) ||
+```
+
+In the standard pipeline C is trivially ~0 because the sprite is pasted at pixel_coords(f_pred). The non-trivial constraint is that the decoded sprite's purple pixels must be *centered within the 32×32 frame* (otherwise the composite centroid drifts from the paste point).
+
+**Constraint-guided SDEdit**
+
+With `SPRITE_CONSTRAINT_ALPHA > 0`, after each denoising step a gradient step minimizes:
+
+```
+C_center(z_sprite) = || centroid(soft_purple(decode(z_sprite))) - (S/2, S/2) ||²
+```
+
+where `soft_purple` is a differentiable relaxation of the hard threshold (sigmoid with T=0.02). This directly implements the research direction: diffusion adjusts latents to satisfy the physical constraint rather than having it satisfied by construction.
+
+```
+dz_norm ← dz_norm - α · ∂C_center/∂z_norm
+```
+
+**Make targets:** `full-segment segment-rollout` with `SPRITE_CONSTRAINT_ALPHA=0.05`
+
+**Status: implemented** (`outputs/paradigm_a_visible_v1` — see [paradigm_comparison.md](paradigm_comparison.md))
+
 ## Loss Functions
 
 ### AE (`piwm_vae_loss`)

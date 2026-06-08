@@ -241,3 +241,52 @@ Detection rate is 1.0 for all methods, but this does not mean all methods render
 The centroid numbers for baseline methods measure where the smear's center of mass lands, not where a shaped lander is. These metrics are directly comparable only between P4 variants (A+P4 vs B+P4). Cross-method comparison (P4 vs baseline) should be interpreted with this in mind.
 
 A shape-aware constraint checker (e.g. checking pixel count, aspect ratio, or using SAM/color segmentation to train proper segment decoders) would give a fairer cross-method comparison and is a natural next step.
+
+---
+
+## Paradigm A (visible filter) — `outputs/paradigm_a_visible_v1`
+
+**Setup:** 20 epochs, 40 train files, 10 test files, REQUIRE_VISIBLE=1 (lander fully on-screen for all stages), SpriteVAE 32×32 → 16-dim, SpriteDDPM 50 steps, SDEdit t_start=7. 626 visible triplets in test set.
+
+### Component Quality
+
+| Stage | Best loss | Notes |
+|---|---|---|
+| AE | 0.250 (epoch 14) | Early stopped epoch 19 |
+| Physical encoder | 0.271 (epoch 3) | Early stopped |
+| SpriteVAE | 0.0019 (epoch 19) | Converged — sprites reconstruct well |
+| SpriteDDPM | 0.506 (epoch 20) | Still improving |
+
+### Physical Encoder R² (visible frames only)
+
+| Dim | R² | Notes |
+|---|---|---|
+| x | 0.722 | Good |
+| y | 0.302 | Weak — sparse signal even on visible frames |
+| θ | 0.087 | Very weak — angle barely recoverable from full frame |
+
+Without visibility filter, y R² was −0.97 (off-screen positions dominated). The filter is load-bearing.
+
+### Rollout Results (626 triplets, SDEdit t=7)
+
+| Metric | Baseline (AE pos) | +DetectedPos +CurTheta |
+|---|---|---|
+| Image MSE ↓ | 0.0029 | **0.0013** |
+| Crop MSE (diffusion) ↓ | 0.0470 | **0.0251** |
+| Crop MSE (mean sprite) ↓ | 0.0427 | **0.0219** |
+| Dynamics GT MSE ↓ | 0.2491 | 0.2491 |
+| Detection rate ↑ | **1.000** | **1.000** |
+| Centroid err/pred (px) ↓ | **1.999** | 2.063 |
+| Centroid err/true (px) ↓ | 14.734 | **3.232** |
+
+**+DetectedPos**: replace AE-predicted (x,y) with color-mask centroid from image_t1 (oracle position from current frame, not a learned component). **+CurTheta**: condition SpriteDDPM on ground-truth θ from state_t1 instead of dynamics-predicted θ.
+
+### Key Findings
+
+**Position is the main bottleneck.** Replacing AE position with the color-mask centroid halves crop MSE (0.047 → 0.025) and drops centroid error from 14.7px to 3.2px. The remaining 3.2px is dynamics error (predicting *next* position from current), not sprite generation error.
+
+**Diffusion barely beats mean sprite.** Even with oracle position and theta (0.025 vs 0.022), the SpriteDDPM adds minimal value. Root cause: theta conditioning is weak (R²=0.087) and a 32×32 lander looks nearly identical across angles. The diffusion component is not yet differentiating itself from the trivial baseline.
+
+**Constraint is satisfied by construction.** Detection rate 1.0 and centroid_err_vs_pred ≈ 2px in all cases. The 2px residual is sprite decentering (lander not perfectly centered in the 32×32 frame). This is the non-trivial constraint that `--constraint_alpha` is designed to reduce.
+
+**What diffusion should learn (research direction).** The current pipeline satisfies C(y, f) mechanically (paste at predicted position). The meaningful research question is whether the diffusion can *actively adjust* z_sprite to satisfy C, rather than having it guaranteed by compositing. Constraint-guided SDEdit (`SPRITE_CONSTRAINT_ALPHA > 0`) implements this: gradient steps during denoising push z_sprite toward generating a centered lander, enforcing C through learning rather than geometry.

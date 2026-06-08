@@ -17,7 +17,7 @@ from piwm_diffusion.diffusion import ConditionalDenoiserMLP, DiffusionSchedule, 
 from piwm_diffusion.dynamics import LunarSecondOrderDynamics
 from piwm_diffusion.physical import PhysicalAutoencoder
 from piwm_diffusion.train_utils import device_from_arg, load_autoencoder, set_seed, write_json
-from piwm_diffusion.viz import save_reconstruction_grid
+from piwm_diffusion.viz import save_reconstruction_grid, save_three_row_comparison
 
 
 def lander_pixel_mask(img, lander_threshold=0.08):
@@ -63,6 +63,16 @@ def main():
                         help="0 = no limit (use all triplets from each file)")
     parser.add_argument("--num_viz", type=int, default=8)
     parser.add_argument("--clamp_physical_dims", action="store_true")
+    parser.add_argument("--require_visible", action="store_true",
+                        help="Only evaluate on triplets where all 3 frames have lander fully on-screen")
+    parser.add_argument("--sdedit_t_start", type=int, default=-1,
+                        help="SDEdit start timestep: forward-diffuse the physics-predicted z to this step, "
+                             "then denoise from there instead of from pure noise. "
+                             "-1 disables SDEdit (default). Good range: num_diffusion_steps//4 to //2.")
+    parser.add_argument("--constraint_alpha", type=float, default=0.0,
+                        help="Constraint guidance strength. At each denoising step, nudges z[:k] toward "
+                             "the dynamics-predicted physical state f. 0.0 disables (default). "
+                             "Try 0.01-0.1. Uses P1 property: z[:k] encodes [x,y,theta] directly.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -119,6 +129,8 @@ def main():
         state_key=args.state_key,
         max_files=args.max_files,
         max_triplets_per_file=args.max_triplets_per_file,
+        require_visible=args.require_visible,
+        file_seed=args.seed,
     )
     generator = torch.Generator().manual_seed(args.seed + 2000)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=0, generator=generator)
@@ -141,6 +153,7 @@ def main():
     cc_err_vs_true = []
     all_real = []
     all_generated = []
+    all_deterministic = []
 
     for batch in tqdm(loader, desc="rollout"):
         image_t = batch["image_t"].to(device)
@@ -154,15 +167,39 @@ def main():
             f_t1 = encode_f(autoencoder, physical_model, image_t1)
             f_pred = dynamics(f_t, f_t1, action)
 
+            # Deterministic physics-predicted z (used as SDEdit seed when enabled)
+            z_dp = physical_model.decoder(f_pred)
+            image_dp = autoencoder.decode(z_dp)
+
             cond_norm = (f_pred - cond_mean) / cond_std
-            z_norm = sample_latents(diffusion, schedule, cond_norm, int(ddpm_ckpt["latent_dim"]))
+            sdedit_t = args.sdedit_t_start if args.sdedit_t_start > 0 else None
+            z_dp_norm = (z_dp - latent_mean) / latent_std if sdedit_t is not None else None
+
+            # Constraint closure: nudge z[:k] toward f at each denoising step.
+            # Operates in raw z space to avoid normalization confusion, then
+            # re-normalizes. Gradient of |z[:k] - f|^2 is 2*(z[:k] - f).
+            k = len(state_indices)
+            alpha = args.constraint_alpha
+            lm, ls = latent_mean, latent_std
+            f_target = f_pred  # dynamics prediction — NOT ground truth
+
+            def constraint_fn(z_n: torch.Tensor) -> torch.Tensor:
+                if alpha <= 0.0:
+                    return z_n
+                z_raw = z_n * ls + lm
+                grad = 2.0 * (z_raw[:, :k] - f_target)
+                z_raw[:, :k] = z_raw[:, :k] - alpha * grad
+                return (z_raw - lm) / ls
+
+            z_norm = sample_latents(
+                diffusion, schedule, cond_norm, int(ddpm_ckpt["latent_dim"]),
+                x0_init=z_dp_norm, t_start=sdedit_t,
+                constraint_fn=constraint_fn if alpha > 0.0 else None,
+            )
             z_gen = z_norm * latent_std + latent_mean
             if args.clamp_physical_dims:
                 z_gen[:, : len(state_indices)] = f_pred
             image_gen = autoencoder.decode(z_gen)
-
-            z_dp = physical_model.decoder(f_pred)
-            image_dp = autoencoder.decode(z_dp)
             f_from_gen, _ = physical_model(z_gen)
 
         metrics["dynamics_gt_mse"].append(F.mse_loss(f_pred, gt_f2).item())
@@ -204,17 +241,21 @@ def main():
 
         all_real.append(image_t2)
         all_generated.append(image_gen)
+        all_deterministic.append(image_dp)
 
     # Randomly sample visualization frames from entire test set
     if all_real:
         all_real = torch.cat(all_real, dim=0)
         all_generated = torch.cat(all_generated, dim=0)
+        all_deterministic = torch.cat(all_deterministic, dim=0)
         indices = np.random.choice(len(all_real), size=min(args.num_viz, len(all_real)), replace=False)
         viz_real = all_real[indices]
         viz_generated = all_generated[indices]
+        viz_deterministic = all_deterministic[indices]
     else:
         viz_real = None
         viz_generated = None
+        viz_deterministic = None
 
     summary = {
         key: float(np.mean(values)) if values else None
@@ -230,15 +271,33 @@ def main():
             "num_triplets": len(ds),
             "state_indices": state_indices,
             "clamp_physical_dims": bool(args.clamp_physical_dims),
+            "sdedit_t_start": args.sdedit_t_start,
+            "constraint_alpha": args.constraint_alpha,
         }
     )
     write_json(os.path.join(args.output_dir, "summary.json"), summary)
     if viz_real is not None and viz_generated is not None:
+        n_viz = min(args.num_viz, viz_real.size(0))
+        sdedit_label = f"t_start={args.sdedit_t_start}" if args.sdedit_t_start > 0 else "pure noise"
+        alpha_label  = f"α={args.constraint_alpha}" if args.constraint_alpha > 0 else "no constraint"
+        save_three_row_comparison(
+            viz_real,
+            viz_deterministic,
+            viz_generated,
+            os.path.join(args.output_dir, "rollout_comparison.png"),
+            num_images=n_viz,
+            row_labels=(
+                "Real (ground truth future frame)",
+                "Deterministic — physics decoder only, no diffusion",
+                f"Generated — SDEdit ({sdedit_label}) + constraint ({alpha_label})",
+            ),
+            suptitle="PIWM Rollout: Real vs Deterministic vs Diffusion-Generated",
+        )
         save_reconstruction_grid(
             viz_real,
             viz_generated,
             os.path.join(args.output_dir, "rollout_real_vs_generated.png"),
-            num_images=min(args.num_viz, viz_real.size(0)),
+            num_images=n_viz,
             suptitle="Random rollout examples: real future vs PIWM+diffusion generated",
         )
     print(summary)

@@ -1,11 +1,30 @@
 import glob
 import os
+import random
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+
+def lander_fully_visible(img_hwc: np.ndarray, min_pixels: int = 30) -> bool:
+    """Return True if the lander is fully on-screen in a uint8 HWC image.
+
+    Uses the purple color mask (b > r+13, b > g+13 in 0-255 space).
+    Fails if fewer than min_pixels purple pixels exist or if the lander
+    bounding box touches any image edge (indicating clipping).
+    """
+    r, g, b = img_hwc[:, :, 0], img_hwc[:, :, 1], img_hwc[:, :, 2]
+    mask = (b.astype(np.int16) > r.astype(np.int16) + 13) & \
+           (b.astype(np.int16) > g.astype(np.int16) + 13)
+    if mask.sum() < min_pixels:
+        return False
+    rows, cols = np.where(mask)
+    H, W = img_hwc.shape[:2]
+    return int(rows.min()) > 0 and int(rows.max()) < H - 1 and \
+           int(cols.min()) > 0 and int(cols.max()) < W - 1
 
 
 @dataclass(frozen=True)
@@ -38,11 +57,16 @@ class LunarFrameDataset(Dataset):
         state_key: str = "states",
         max_files: Optional[int] = None,
         max_frames_per_file: Optional[int] = None,
+        require_visible: bool = False,
+        visible_min_pixels: int = 30,
+        file_seed: Optional[int] = None,
     ) -> None:
         self.data_dir = data_dir
         self.state_key = state_key
         self.files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
         if max_files is not None:
+            if file_seed is not None:
+                random.Random(file_seed).shuffle(self.files)
             self.files = self.files[:max_files]
         if not self.files:
             raise ValueError(f"No .npz files found in {data_dir}")
@@ -54,10 +78,13 @@ class LunarFrameDataset(Dataset):
                     raise KeyError(f"{path} is missing key 'imgs'")
                 if state_key not in data:
                     raise KeyError(f"{path} is missing key '{state_key}'")
-                n_frames = int(data["imgs"].shape[0])
+                imgs = data["imgs"]
+                n_frames = int(imgs.shape[0])
                 if max_frames_per_file is not None:
                     n_frames = min(n_frames, max_frames_per_file)
                 for frame_idx in range(n_frames):
+                    if require_visible and not lander_fully_visible(imgs[frame_idx], visible_min_pixels):
+                        continue
                     self.index.append((file_idx, frame_idx))
 
     def __len__(self) -> int:
@@ -97,11 +124,16 @@ class LunarTripletDataset(Dataset):
         state_key: str = "states",
         max_files: Optional[int] = None,
         max_triplets_per_file: Optional[int] = None,
+        require_visible: bool = False,
+        visible_min_pixels: int = 30,
+        file_seed: Optional[int] = None,
     ) -> None:
         self.data_dir = data_dir
         self.state_key = state_key
         self.files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
         if max_files is not None:
+            if file_seed is not None:
+                random.Random(file_seed).shuffle(self.files)
             self.files = self.files[:max_files]
         if not self.files:
             raise ValueError(f"No .npz files found in {data_dir}")
@@ -113,10 +145,17 @@ class LunarTripletDataset(Dataset):
                     raise KeyError(f"{path} is missing key 'imgs'")
                 if state_key not in data:
                     raise KeyError(f"{path} is missing key '{state_key}'")
-                n_triplets = max(0, int(data["imgs"].shape[0]) - 2)
+                imgs = data["imgs"]
+                n_triplets = max(0, int(imgs.shape[0]) - 2)
                 if max_triplets_per_file is not None:
                     n_triplets = min(n_triplets, max_triplets_per_file)
                 for t in range(n_triplets):
+                    if require_visible:
+                        if not all(
+                            lander_fully_visible(imgs[t + i], visible_min_pixels)
+                            for i in range(3)
+                        ):
+                            continue
                     self.index.append((file_idx, t))
 
     def __len__(self) -> int:

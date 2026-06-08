@@ -79,6 +79,7 @@ def main():
     parser.add_argument("--max_train_files", type=int, default=None)
     parser.add_argument("--max_test_files", type=int, default=None)
     parser.add_argument("--max_triplets_per_file", type=int, default=None)
+    parser.add_argument("--require_visible", action="store_true", help="Only train on triplets where all 3 frames have lander fully on-screen")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stage_label", default="")
@@ -114,12 +115,16 @@ def main():
         state_key=args.state_key,
         max_files=args.max_train_files,
         max_triplets_per_file=args.max_triplets_per_file,
+        require_visible=args.require_visible,
+        file_seed=args.seed,
     )
     test_ds = LunarTripletDataset(
         args.test_dir,
         state_key=args.state_key,
         max_files=args.max_test_files,
         max_triplets_per_file=args.max_triplets_per_file,
+        require_visible=args.require_visible,
+        file_seed=args.seed,
     )
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)

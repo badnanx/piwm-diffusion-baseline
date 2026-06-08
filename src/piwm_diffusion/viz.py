@@ -73,6 +73,44 @@ def save_reconstruction_grid(
     plt.close(fig)
 
 
+def save_three_row_comparison(
+    real: torch.Tensor,
+    deterministic: torch.Tensor,
+    generated: torch.Tensor,
+    path: str,
+    num_images: int = 8,
+    row_labels: tuple[str, str, str] = (
+        "Real (ground truth)",
+        "Deterministic (physics decoder, no diffusion)",
+        "Generated (SDEdit + constraint)",
+    ),
+    suptitle: Optional[str] = None,
+) -> None:
+    """Three-row comparison: real vs deterministic vs diffusion-generated."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    n = min(num_images, real.size(0))
+    real = real[:n].detach().cpu().clamp(0.0, 1.0)
+    deterministic = deterministic[:n].detach().cpu().clamp(0.0, 1.0)
+    generated = generated[:n].detach().cpu().clamp(0.0, 1.0)
+
+    fig, axes = plt.subplots(3, n, figsize=(2 * n, 6))
+    rows = [real, deterministic, generated]
+
+    for row_idx, (imgs, label) in enumerate(zip(rows, row_labels)):
+        for col_idx in range(n):
+            ax = axes[row_idx, col_idx]
+            ax.imshow(imgs[col_idx].permute(1, 2, 0))
+            ax.axis("off")
+            if col_idx == 0:
+                ax.set_ylabel(label, fontsize=8, rotation=0, labelpad=120, va="center")
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=10, y=1.01)
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _draw_crop_box(ax, state: torch.Tensor, img_h: int, img_w: int, crop_size: int) -> None:
     state_batch = state.detach().cpu().view(1, -1)
     px, py = state_xy_to_pixel(state_batch, img_h, img_w)

@@ -53,6 +53,56 @@ class CropVAE(nn.Module):
         return recon, mu, logvar
 
 
+class SpriteVAE(nn.Module):
+    """
+    VAE for sprite_size×sprite_size RGB lander sprites.
+
+    Works for any sprite_size divisible by 4.
+    Default 32×32: 32→16→8 (feature_dim = 64*8*8 = 4096)
+    """
+
+    def __init__(self, latent_dim: int = 16, sprite_size: int = 32) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.sprite_size = sprite_size
+        s = sprite_size // 4
+        self.feature_dim = 64 * s * s
+        self._s = s
+
+        self.encoder_conv = nn.Sequential(
+            nn.Conv2d(3, 32, 4, stride=2, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(32, 64, 4, stride=2, padding=1),
+            nn.SiLU(),
+        )
+        self.fc_mu     = nn.Linear(self.feature_dim, latent_dim)
+        self.fc_logvar = nn.Linear(self.feature_dim, latent_dim)
+        self.fc_decode = nn.Linear(latent_dim, self.feature_dim)
+        self.decoder_conv = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),
+            nn.SiLU(),
+            nn.ConvTranspose2d(32, 3, 4, stride=2, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder_conv(x).reshape(x.size(0), -1)
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        h = self.fc_decode(z).reshape(z.size(0), 64, self._s, self._s)
+        return self.decoder_conv(h)
+
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            return mu + torch.randn_like(mu) * torch.exp(0.5 * logvar)
+        return mu
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mu, logvar = self.encode(x)
+        return self.decode(self.reparameterize(mu, logvar)), mu, logvar
+
+
 def crop_vae_loss(
     recon: torch.Tensor,
     image: torch.Tensor,

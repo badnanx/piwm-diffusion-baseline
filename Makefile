@@ -20,14 +20,33 @@ DDPM_STEPS ?= 15
 STATE_INDICES ?= 0 1 4
 STATE_WEIGHT ?= 1.0
 CROP_WEIGHT ?= 1.0
-CROP_SIZE ?= 24
+CROP_SIZE ?= 32
 CROP_LATENT_DIM ?= 16
 CROP_EPOCHS ?= 20
 CROP_DDPM_HIDDEN ?= 128
 CROP_DDPM_LAYERS ?= 3
 CROP_DDPM_STEPS ?= 15
+SDEDIT_T_START ?= 7
+CONSTRAINT_ALPHA ?= 0.05
+REQUIRE_VISIBLE ?= 0
+VISIBLE_FLAG = $(if $(filter 1,$(REQUIRE_VISIBLE)),--require_visible,)
+SPRITE_SIZE ?= 32
+SPRITE_LATENT_DIM ?= 16
+SPRITE_DDPM_HIDDEN ?= 128
+SPRITE_DDPM_LAYERS ?= 3
+SPRITE_DDPM_STEPS ?= 50
+SPRITE_EPOCHS ?= 20
+SPRITE_SDEDIT_T_START ?= 7
+DETECTED_POSITION ?= 0
+CURRENT_THETA ?= 0
+SPRITE_CONSTRAINT_ALPHA ?= 0.0
+SPRITE_CONSTRAINT_STEPS ?= 1
+DETECTED_FLAG = $(if $(filter 1,$(DETECTED_POSITION)),--use_detected_position,)
+CURRENT_THETA_FLAG = $(if $(filter 1,$(CURRENT_THETA)),--use_current_theta,)
+SPRITE_CONSTRAINT_FLAG = $(if $(filter-out 0.0,$(SPRITE_CONSTRAINT_ALPHA)),--constraint_alpha $(SPRITE_CONSTRAINT_ALPHA) --constraint_steps $(SPRITE_CONSTRAINT_STEPS),)
+SEGMENT_ROLLOUT_SUFFIX = $(if $(filter-out 0.0,$(SPRITE_CONSTRAINT_ALPHA)),_constrained_a$(SPRITE_CONSTRAINT_ALPHA),)
 
-.PHONY: full-fast full-fast-crop full-fast-crop-p4 ae ae-crop24 vq vq-crop24 physical dynamics export-latents ddpm samples rollout eval-physical eval-dynamics crop-ae export-crop-latents crop-ddpm p4-eval check-cuda
+.PHONY: full-fast full-fast-crop full-fast-crop-p4 full-segment ae ae-crop24 vq vq-crop24 physical dynamics export-latents ddpm samples rollout rollout-sdedit rollout-constrained rollout-all rollout-compare eval-physical eval-dynamics crop-ae export-crop-latents crop-ddpm p4-eval segment-ae export-segment-latents segment-ddpm segment-rollout check-cuda
 
 full-fast: check-cuda ae physical dynamics export-latents ddpm samples rollout
 	@echo "Full laptop-fast PIWM + latent diffusion run complete."
@@ -75,7 +94,7 @@ ae:
 	  --stage_label "Stage 1/7 | AE (continuous VAE)"
 
 ae-crop24:
-	@echo "\n=== STAGE 1/9: AE (continuous VAE + crop-24 loss) ===\n"
+	@echo "\n=== STAGE 1/9: AE (continuous VAE + crop-32 loss) ===\n"
 	$(PYTHON) scripts/train_autoencoder.py \
 	  --train_dir $(TRAIN_DIR) \
 	  --test_dir $(TEST_DIR) \
@@ -91,7 +110,8 @@ ae-crop24:
 	  --max_test_files $(TEST_FILES) \
 	  --device $(DEVICE) \
 	  --seed $(SEED) \
-	  --stage_label "Stage 1/9 | AE (continuous VAE + crop-24)"
+	  --stage_label "Stage 1/9 | AE (continuous VAE + crop-32)" \
+	  $(VISIBLE_FLAG)
 
 vq:
 	@echo "\n=== STAGE 1/7: AE (VQ-VAE, no crop) ===\n"
@@ -110,7 +130,7 @@ vq:
 	  --stage_label "Stage 1/7 | AE (VQ-VAE)"
 
 vq-crop24:
-	@echo "\n=== STAGE 1/9: AE (VQ-VAE + crop-24 loss) ===\n"
+	@echo "\n=== STAGE 1/9: AE (VQ-VAE + crop-32 loss) ===\n"
 	$(PYTHON) scripts/train_vq_autoencoder.py \
 	  --train_dir $(TRAIN_DIR) \
 	  --test_dir $(TEST_DIR) \
@@ -126,7 +146,7 @@ vq-crop24:
 	  --max_test_files $(TEST_FILES) \
 	  --device $(DEVICE) \
 	  --seed $(SEED) \
-	  --stage_label "Stage 1/9 | AE (VQ-VAE + crop-24)"
+	  --stage_label "Stage 1/9 | AE (VQ-VAE + crop-32)"
 
 physical:
 	@echo "\n=== STAGE 2/9: Physical Encoder (z -> f) ===\n"
@@ -144,7 +164,8 @@ physical:
 	  --max_test_files $(TEST_FILES) \
 	  --device $(DEVICE) \
 	  --seed $(SEED) \
-	  --stage_label "Stage 2/9 | Physical Encoder"
+	  --stage_label "Stage 2/9 | Physical Encoder" \
+	  $(VISIBLE_FLAG)
 
 dynamics:
 	@echo "\n=== STAGE 4/9: Dynamics Model (f_t, f_t1, a -> f_t2) ===\n"
@@ -160,7 +181,8 @@ dynamics:
 	  --max_test_files $(TEST_FILES) \
 	  --device $(DEVICE) \
 	  --seed $(SEED) \
-	  --stage_label "Stage 4/9 | Dynamics Model"
+	  --stage_label "Stage 4/9 | Dynamics Model" \
+	  $(VISIBLE_FLAG)
 
 eval-dynamics:
 	@echo "\n=== STAGE 5/9: Eval Dynamics (scatter + position overlay) ===\n"
@@ -172,7 +194,8 @@ eval-dynamics:
 	  --output_dir $(RUN_DIR)/dynamics_eval \
 	  --max_test_files $(TEST_FILES) \
 	  --device $(DEVICE) \
-	  --seed $(SEED)
+	  --seed $(SEED) \
+	  $(VISIBLE_FLAG)
 
 eval-physical:
 	@echo "\n=== STAGE 3/9: Eval Physical Encoder (scatter + R² per dim) ===\n"
@@ -183,7 +206,8 @@ eval-physical:
 	  --output_dir $(RUN_DIR)/physical_eval \
 	  --max_test_files $(TEST_FILES) \
 	  --device $(DEVICE) \
-	  --seed $(SEED)
+	  --seed $(SEED) \
+	  $(VISIBLE_FLAG)
 
 export-latents:
 	@echo "\n=== STAGE 6/9: Export Latents (z + conditions -> .npz) ===\n"
@@ -193,14 +217,16 @@ export-latents:
 	  --output_npz $(RUN_DIR)/latents_train.npz \
 	  --max_files $(TRAIN_FILES) \
 	  --state_indices $(STATE_INDICES) \
-	  --device $(DEVICE)
+	  --device $(DEVICE) \
+	  $(VISIBLE_FLAG)
 	$(PYTHON) scripts/export_latents.py \
 	  --checkpoint $(RUN_DIR)/ae/best.pt \
 	  --data_dir $(TEST_DIR) \
 	  --output_npz $(RUN_DIR)/latents_test.npz \
 	  --max_files $(TEST_FILES) \
 	  --state_indices $(STATE_INDICES) \
-	  --device $(DEVICE)
+	  --device $(DEVICE) \
+	  $(VISIBLE_FLAG)
 
 ddpm:
 	@echo "\n=== STAGE 7/9: DDPM (latent diffusion, conditioned on f) ===\n"
@@ -242,7 +268,131 @@ rollout:
 	  --num_viz 16 \
 	  --max_triplets_per_file 0 \
 	  --device $(DEVICE) \
-	  --seed $(SEED)
+	  --seed $(SEED) \
+	  $(VISIBLE_FLAG)
+
+rollout-sdedit:
+	@echo "\n=== SDEdit Rollout Eval (seed from physics decoder, t_start=$(SDEDIT_T_START)) ===\n"
+	$(PYTHON) scripts/eval_piwm_diffusion_rollout.py \
+	  --autoencoder_checkpoint $(RUN_DIR)/ae/best.pt \
+	  --physical_checkpoint $(RUN_DIR)/physical/best.pt \
+	  --dynamics_checkpoint $(RUN_DIR)/dynamics/best.pt \
+	  --diffusion_checkpoint $(RUN_DIR)/ddpm/best.pt \
+	  --data_dir $(TEST_DIR) \
+	  --output_dir $(RUN_DIR)/rollout_sdedit_t$(SDEDIT_T_START) \
+	  --batch_size 16 \
+	  --max_files $(TEST_FILES) \
+	  --num_viz 16 \
+	  --max_triplets_per_file 0 \
+	  --sdedit_t_start $(SDEDIT_T_START) \
+	  --device $(DEVICE) \
+	  --seed $(SEED) \
+	  $(VISIBLE_FLAG)
+
+rollout-constrained:
+	@echo "\n=== Constrained SDEdit Rollout (t_start=$(SDEDIT_T_START), alpha=$(CONSTRAINT_ALPHA)) ===\n"
+	$(PYTHON) scripts/eval_piwm_diffusion_rollout.py \
+	  --autoencoder_checkpoint $(RUN_DIR)/ae/best.pt \
+	  --physical_checkpoint $(RUN_DIR)/physical/best.pt \
+	  --dynamics_checkpoint $(RUN_DIR)/dynamics/best.pt \
+	  --diffusion_checkpoint $(RUN_DIR)/ddpm/best.pt \
+	  --data_dir $(TEST_DIR) \
+	  --output_dir $(RUN_DIR)/rollout_constrained_t$(SDEDIT_T_START)_a$(CONSTRAINT_ALPHA) \
+	  --batch_size 16 \
+	  --max_files $(TEST_FILES) \
+	  --num_viz 16 \
+	  --max_triplets_per_file 0 \
+	  --sdedit_t_start $(SDEDIT_T_START) \
+	  --constraint_alpha $(CONSTRAINT_ALPHA) \
+	  --device $(DEVICE) \
+	  --seed $(SEED) \
+	  $(VISIBLE_FLAG)
+
+rollout-compare:
+	@echo "\n=== Rollout Comparison Table ===\n"
+	$(PYTHON) scripts/compare_rollout_runs.py --run_dir $(RUN_DIR)
+
+rollout-all: rollout rollout-sdedit rollout-constrained rollout-compare
+
+# ── SegmentVAE pipeline ──────────────────────────────────────────────────────
+# Shares AE + physical encoder + dynamics with full-fast-crop.
+# Only the sprite VAE, sprite DDPM, and rollout eval are new.
+
+segment-ae:
+	@echo "\n=== SEGMENT 1/3: SpriteVAE (segmented lander sprites) ===\n"
+	$(PYTHON) scripts/train_segment_ae.py \
+	  --train_dir $(TRAIN_DIR) \
+	  --test_dir $(TEST_DIR) \
+	  --output_dir $(RUN_DIR)/segment_ae \
+	  --latent_dim $(SPRITE_LATENT_DIM) \
+	  --sprite_size $(SPRITE_SIZE) \
+	  --epochs $(SPRITE_EPOCHS) \
+	  --batch_size $(AE_BATCH) \
+	  --max_train_files $(TRAIN_FILES) \
+	  --max_test_files $(TEST_FILES) \
+	  --device $(DEVICE) \
+	  --seed $(SEED) \
+	  --stage_label "Segment 1/3 | SpriteVAE"
+
+export-segment-latents:
+	@echo "\n=== SEGMENT 2/3 (train): Export sprite latents + theta ===\n"
+	$(PYTHON) scripts/export_segment_latents.py \
+	  --checkpoint $(RUN_DIR)/segment_ae/best.pt \
+	  --data_dir $(TRAIN_DIR) \
+	  --output_npz $(RUN_DIR)/sprite_latents_train.npz \
+	  --max_files $(TRAIN_FILES) \
+	  --device $(DEVICE)
+	@echo "\n=== SEGMENT 2/3 (test): Export sprite latents + theta ===\n"
+	$(PYTHON) scripts/export_segment_latents.py \
+	  --checkpoint $(RUN_DIR)/segment_ae/best.pt \
+	  --data_dir $(TEST_DIR) \
+	  --output_npz $(RUN_DIR)/sprite_latents_test.npz \
+	  --max_files $(TEST_FILES) \
+	  --device $(DEVICE)
+
+segment-ddpm:
+	@echo "\n=== SEGMENT 3/3: Sprite DDPM (conditioned on theta) ===\n"
+	$(PYTHON) scripts/train_conditional_latent_ddpm.py \
+	  --train_npz $(RUN_DIR)/sprite_latents_train.npz \
+	  --val_npz $(RUN_DIR)/sprite_latents_test.npz \
+	  --output_dir $(RUN_DIR)/sprite_ddpm \
+	  --epochs $(SPRITE_EPOCHS) \
+	  --batch_size $(DDPM_BATCH) \
+	  --diffusion_steps $(SPRITE_DDPM_STEPS) \
+	  --hidden_dim $(SPRITE_DDPM_HIDDEN) \
+	  --num_layers $(SPRITE_DDPM_LAYERS) \
+	  --device $(DEVICE) \
+	  --seed $(SEED) \
+	  --stage_label "Segment 3/3 | SpriteDDPM"
+
+segment-rollout:
+	@echo "\n=== Segment Rollout Eval ===\n"
+	$(PYTHON) scripts/eval_segment_rollout.py \
+	  --autoencoder_checkpoint $(RUN_DIR)/ae/best.pt \
+	  --physical_checkpoint $(RUN_DIR)/physical/best.pt \
+	  --dynamics_checkpoint $(RUN_DIR)/dynamics/best.pt \
+	  --sprite_ae_checkpoint $(RUN_DIR)/segment_ae/best.pt \
+	  --sprite_ddpm_checkpoint $(RUN_DIR)/sprite_ddpm/best.pt \
+	  --data_dir $(TEST_DIR) \
+	  --output_dir $(RUN_DIR)/segment_rollout$(SEGMENT_ROLLOUT_SUFFIX) \
+	  --max_files $(TEST_FILES) \
+	  --max_triplets_per_file 0 \
+	  --batch_size 16 \
+	  --num_viz 16 \
+	  --sdedit_t_start $(SPRITE_SDEDIT_T_START) \
+	  --device $(DEVICE) \
+	  --seed $(SEED) \
+	  $(VISIBLE_FLAG) \
+	  $(DETECTED_FLAG) \
+	  $(CURRENT_THETA_FLAG) \
+	  $(SPRITE_CONSTRAINT_FLAG)
+
+full-segment: check-cuda ae-crop24 physical eval-physical dynamics eval-dynamics segment-ae export-segment-latents segment-ddpm segment-rollout
+	@echo "Full SegmentVAE pipeline complete."
+	@echo "Inspect: $(RUN_DIR)/ae/recon_best.png"
+	@echo "Inspect: $(RUN_DIR)/segment_ae/recon_best.png"
+	@echo "Inspect: $(RUN_DIR)/segment_rollout/segment_rollout_comparison.png"
+	@echo "Inspect: $(RUN_DIR)/segment_rollout/summary.json"
 
 # ── P4: CropVAE + CropDDPM compositor ────────────────────────────────────────
 

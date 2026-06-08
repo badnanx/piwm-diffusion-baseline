@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--max_files", type=int, default=None)
     parser.add_argument("--max_frames_per_file", type=int, default=None)
+    parser.add_argument("--require_visible", action="store_true", help="Only export latents for frames where lander is fully on-screen")
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
 
@@ -64,6 +65,8 @@ def main():
         state_key=args.state_key,
         max_files=args.max_files,
         max_frames_per_file=args.max_frames_per_file,
+        require_visible=args.require_visible,
+        file_seed=42,
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 

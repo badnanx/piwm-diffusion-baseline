@@ -1,4 +1,5 @@
 import math
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -94,11 +95,32 @@ def sample_latents(
     schedule: DiffusionSchedule,
     cond: torch.Tensor,
     latent_dim: int,
+    x0_init: torch.Tensor | None = None,
+    t_start: int | None = None,
+    constraint_fn: "Callable[[torch.Tensor], torch.Tensor] | None" = None,
 ) -> torch.Tensor:
-    model.eval()
-    x = torch.randn(cond.size(0), latent_dim, device=cond.device)
+    """Sample latents from the diffusion model.
 
-    for step in reversed(range(schedule.num_steps)):
+    x0_init + t_start: SDEdit — forward-diffuse x0_init to t_start, then
+    reverse from there instead of from pure noise.
+
+    constraint_fn: optional callable (z_norm) -> z_norm applied after each
+    denoising step to steer latents toward physical consistency. Should be
+    a closed-over function that has access to f and normalization stats.
+    """
+    model.eval()
+
+    if x0_init is not None and t_start is not None and t_start > 0:
+        t_start = min(t_start, schedule.num_steps - 1)
+        alpha_bar = schedule.alpha_bars[t_start]
+        noise = torch.randn_like(x0_init)
+        x = torch.sqrt(alpha_bar) * x0_init + torch.sqrt(1.0 - alpha_bar) * noise
+        end_step = t_start
+    else:
+        x = torch.randn(cond.size(0), latent_dim, device=cond.device)
+        end_step = schedule.num_steps - 1
+
+    for step in reversed(range(end_step + 1)):
         t = torch.full((cond.size(0),), step, device=cond.device, dtype=torch.long)
         beta_t = schedule.betas[step]
         alpha_t = schedule.alphas[step]
@@ -112,5 +134,8 @@ def sample_latents(
             x = mean + torch.sqrt(beta_t) * torch.randn_like(x)
         else:
             x = mean
+
+        if constraint_fn is not None:
+            x = constraint_fn(x)
 
     return x
