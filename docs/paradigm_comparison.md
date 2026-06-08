@@ -172,7 +172,7 @@ P4 crop_mse (0.031) is higher than the baseline DDPM (0.024). The erase step is 
 **The dynamics bottleneck:** P4 exposes what the full-frame DDPM hides. A diffuse smear across the whole image accidentally overlaps the true lander position — P4's precise placement cannot. Improving P4 visual quality requires improving dynamics accuracy first (more training data, more epochs, or conditioning on velocity in addition to position).
 
 **Remaining limitations:**
-- CropDDPM conditioned on θ only — not on y (height). Near-ground crops sometimes include terrain which can appear as a floating terrain sliver. Fix: condition on (θ, y).
+- CropDDPM conditioned on θ only — not on y (height). This is load-bearing in two ways: (1) near-ground crops include terrain pixels (terrain-sliver artifact); (2) at high y (start of episode), the lander is partially or fully offscreen — the 24×24 crop clips against the image edge, so CropVAE learned to generate partially-black sprites for those configurations. Without y in the conditioning, CropDDPM cannot distinguish these cases. Fix: condition on (θ, y). CropVAE training patches should also be labeled with (θ, y) so the latent space organizes by both.
 - Thruster fire (red dots) is filtered from the paste mask but not from CropVAE training — DDPM doesn't generate fire since it's not conditioned on action.
 - Background quality is limited by image_t (episode-specific terrain not generatable from physical state alone — would require SAM + per-frame background segmentation).
 
