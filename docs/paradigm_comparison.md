@@ -198,7 +198,7 @@ CropVAE and CropDDPM converged to identical losses as A+P4 — expected, since t
 
 **P4 quality is independent of which paradigm is underneath it.** The compositor output is driven by CropVAE/CropDDPM quality and dynamics position accuracy — not by whether the upstream AE is continuous or discrete. Both A+P4 and B+P4 produce similar crop_mse and similar visual artifacts (misplaced or missing lander).
 
-### Full Comparison Table
+### Full Comparison Table (crop_mse)
 
 | Method | crop_mse | Notes |
 |---|---|---|
@@ -208,3 +208,36 @@ CropVAE and CropDDPM converged to identical losses as A+P4 — expected, since t
 | A+P4 compositor | 0.031 | Same |
 
 P4 scores worse than the baseline DDPM by crop_mse. This is the dynamics bottleneck: precise placement at a wrong position scores worse than a diffuse smear that accidentally overlaps the right area. P4 makes the dynamics bottleneck visible rather than hiding it.
+
+---
+
+## Constraint Checker Results
+
+Color-mask centroid extraction applied to all generated images. Purple pixels are detected and their centroid compared to predicted (x,y) from dynamics and true (x,y) from ground-truth state.
+
+| Method | detection_rate | centroid_err_vs_pred_px | centroid_err_vs_true_px |
+|---|---|---|---|
+| A baseline DDPM | 1.000 | 48.6 | 52.3 |
+| B+P1 baseline DDPM | 1.000 | 16.2 | 37.7 |
+| A+P4 compositor | 0.999 | 24.1 | **30.4** |
+| B+P4 compositor | 1.000 | 14.7 | 37.7 |
+
+Image is 100×150px. Errors of 30–52px represent roughly ⅓–½ of the image height.
+
+### Key Findings
+
+**A+P4 genuinely improves over A baseline (30.4 vs 52.3px centroid_err_vs_true).** crop_mse told the opposite story because the A baseline's diffuse smear accidentally overlaps the true lander position, scoring well on crop_mse despite being visually wrong. The centroid metric reveals that A+P4 actually places the lander closer to where it should be.
+
+**B+P4 and B+P1 tie at 37.7px.** P4 adds no positioning improvement for Paradigm B. B+P1's dynamics is the bottleneck, and the compositor can only place the lander as accurately as the dynamics predicts.
+
+**B+P1 centroid_err_vs_pred is low (16.2px).** The purple smear in B+P1's generated frames is concentrated near the dynamics-predicted position — the DDPM learned to put its smear where it was conditioned. This is why B's crop_mse looked artificially good in the three-way comparison.
+
+### Important Caveat
+
+Detection rate is 1.0 for all methods, but this does not mean all methods render a visible lander. The color mask detects purple pixels regardless of shape:
+- **P4 variants**: purple pixels form a recognizable (if misshapen) lander sprite
+- **Baseline DDPM variants**: purple pixels form a diffuse smear — no lander shape
+
+The centroid numbers for baseline methods measure where the smear's center of mass lands, not where a shaped lander is. These metrics are directly comparable only between P4 variants (A+P4 vs B+P4). Cross-method comparison (P4 vs baseline) should be interpreted with this in mind.
+
+A shape-aware constraint checker (e.g. checking pixel count, aspect ratio, or using SAM/color segmentation to train proper segment decoders) would give a fairer cross-method comparison and is a natural next step.
