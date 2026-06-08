@@ -122,7 +122,7 @@ class PiwmVQVAE(nn.Module):
         recon = self.decoder_conv(h)
         return F.interpolate(recon, size=(100, 150), mode="bilinear", align_corners=False)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x: (B, 3, 100, 150) image
@@ -131,6 +131,7 @@ class PiwmVQVAE(nn.Module):
             recon: (B, 3, 100, 150) reconstructed image
             vq_loss: scalar VQ loss
             perplexity: scalar perplexity metric
+            z_pre: (B, latent_dim) pre-quantization features (used for P1 state supervision)
         """
         h = self.encoder_conv(x)
         h = h.reshape(h.size(0), -1)
@@ -139,7 +140,7 @@ class PiwmVQVAE(nn.Module):
         z_quant, vq_loss, perplexity = self.vq_layer(z_pre)
 
         recon = self.decode(z_quant)
-        return recon, vq_loss, perplexity
+        return recon, vq_loss, perplexity, z_pre
 
 
 def vq_vae_loss(
@@ -148,6 +149,7 @@ def vq_vae_loss(
     vq_loss: torch.Tensor,
     state: torch.Tensor,
     state_indices: Sequence[int],
+    z_pre: torch.Tensor,
     state_weight: float = 0.0,
     recon_weight: float = 1.0,
 ) -> dict[str, torch.Tensor]:
@@ -158,19 +160,25 @@ def vq_vae_loss(
         recon: reconstructed image
         image: target image
         vq_loss: VQ commitment loss from layer
-        state: (B, 8) full state (not used here, but kept for compatibility with piwm_vae_loss interface)
-        state_indices: which state dims to supervise (not used for VQ-VAE)
-        state_weight: unused (for API compatibility)
+        state: (B, 8) full state vector
+        state_indices: which state dims to supervise
+        z_pre: (B, latent_dim) pre-quantization features for P1 supervision
+        state_weight: weight on P1 state loss (MSE z_pre[:, :k] vs true state)
         recon_weight: weight on reconstruction loss
-
-    Returns:
-        dict with 'loss', 'recon_loss', 'vq_loss'
     """
     recon_loss = F.mse_loss(recon, image, reduction="mean")
     total = recon_weight * recon_loss + vq_loss
+
+    state_loss = torch.zeros((), device=recon.device)
+    if state_weight > 0.0:
+        k = len(state_indices)
+        target = state[:, state_indices]
+        state_loss = F.mse_loss(z_pre[:, :k], target, reduction="mean")
+        total = total + state_weight * state_loss
 
     return {
         "loss": total,
         "recon_loss": recon_loss,
         "vq_loss": vq_loss,
+        "state_loss": state_loss,
     }

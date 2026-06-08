@@ -25,6 +25,7 @@ def run_epoch(model, loader, optimizer, device, args, train):
         "loss": 0.0,
         "recon_loss": 0.0,
         "vq_loss": 0.0,
+        "state_loss": 0.0,
         "crop_loss": 0.0,
     }
     n = 0
@@ -34,14 +35,15 @@ def run_epoch(model, loader, optimizer, device, args, train):
         state = batch["state"].to(device)
 
         with torch.set_grad_enabled(train):
-            recon, vq_loss, perplexity = model(image)
+            recon, vq_loss, perplexity, z_pre = model(image)
             losses = vq_vae_loss(
                 recon=recon,
                 image=image,
                 vq_loss=vq_loss,
                 state=state,
                 state_indices=args.state_indices,
-                state_weight=0.0,  # No direct state supervision for VQ-VAE
+                z_pre=z_pre,
+                state_weight=args.state_weight,
                 recon_weight=args.recon_weight,
             )
             crop_loss = (
@@ -81,6 +83,7 @@ def main():
     parser.add_argument("--state_indices", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5])
     parser.add_argument("--state_key", default="states")
     parser.add_argument("--recon_weight", type=float, default=1.0)
+    parser.add_argument("--state_weight", type=float, default=0.0)
     parser.add_argument("--crop_weight", type=float, default=0.0)
     parser.add_argument("--crop_size", type=int, default=24)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -94,6 +97,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--stage_label", default="")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -141,12 +145,14 @@ def main():
     print("latent_dim:", args.latent_dim)
     print("num_codebook_vectors:", args.num_codebook_vectors)
     print("beta:", args.beta)
+    print("state_weight:", args.state_weight)
     print("crop_weight:", args.crop_weight)
     print("crop_size:", args.crop_size)
     print("train frames:", len(train_ds), "test frames:", len(test_ds))
 
     for epoch in range(1, args.epochs + 1):
-        print(f"\nEpoch {epoch}/{args.epochs}")
+        prefix = f"[{args.stage_label}] " if args.stage_label else ""
+        print(f"\n{prefix}Epoch {epoch}/{args.epochs}")
         train_metrics = run_epoch(model, train_loader, optimizer, device, args, train=True)
         test_metrics = run_epoch(model, test_loader, optimizer, device, args, train=False)
         row = {"epoch": epoch, "train": train_metrics, "test": test_metrics}
@@ -157,7 +163,7 @@ def main():
         with torch.no_grad():
             batch = next(iter(viz_loader))
             image = batch["image"].to(device)
-            recon, vq_loss, perplexity = model(image)
+            recon, vq_loss, perplexity, _ = model(image)
             epoch_grid_path = os.path.join(args.output_dir, f"recon_epoch_{epoch:03d}.png")
             save_reconstruction_grid(
                 image,

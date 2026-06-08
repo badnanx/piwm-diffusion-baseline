@@ -79,6 +79,7 @@ def main():
     parser.add_argument("--max_frames_per_file", type=int, default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--stage_label", default="")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -124,7 +125,8 @@ def main():
     start = time.time()
 
     for epoch in range(1, args.epochs + 1):
-        print(f"\nEpoch {epoch}/{args.epochs}")
+        prefix = f"[{args.stage_label}] " if args.stage_label else ""
+        print(f"\n{prefix}Epoch {epoch}/{args.epochs}")
         train_metrics = run_epoch(autoencoder, model, train_loader, optimizer, device, args, train=True)
         test_metrics = run_epoch(autoencoder, model, test_loader, optimizer, device, args, train=False)
         row = {"epoch": epoch, "train": train_metrics, "test": test_metrics}

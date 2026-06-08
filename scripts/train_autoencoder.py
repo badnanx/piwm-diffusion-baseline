@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--stage_label", default="")
     args = parser.parse_args()
 
     if len(args.state_indices) > args.latent_dim:
@@ -145,7 +146,8 @@ def main():
     print("train frames:", len(train_ds), "test frames:", len(test_ds))
 
     for epoch in range(1, args.epochs + 1):
-        print(f"\nEpoch {epoch}/{args.epochs}")
+        prefix = f"[{args.stage_label}] " if args.stage_label else ""
+        print(f"\n{prefix}Epoch {epoch}/{args.epochs}")
         train_metrics = run_epoch(model, train_loader, optimizer, device, args, train=True)
         test_metrics = run_epoch(model, test_loader, optimizer, device, args, train=False)
         row = {"epoch": epoch, "train": train_metrics, "test": test_metrics}
