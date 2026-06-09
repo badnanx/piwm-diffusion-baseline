@@ -290,3 +290,23 @@ Without visibility filter, y R² was −0.97 (off-screen positions dominated). T
 **Constraint is satisfied by construction.** Detection rate 1.0 and centroid_err_vs_pred ≈ 2px in all cases. The 2px residual is sprite decentering (lander not perfectly centered in the 32×32 frame). This is the non-trivial constraint that `--constraint_alpha` is designed to reduce.
 
 **What diffusion should learn (research direction).** The current pipeline satisfies C(y, f) mechanically (paste at predicted position). The meaningful research question is whether the diffusion can *actively adjust* z_sprite to satisfy C, rather than having it guaranteed by compositing. Constraint-guided SDEdit (`SPRITE_CONSTRAINT_ALPHA > 0`) implements this: gradient steps during denoising push z_sprite toward generating a centered lander, enforcing C through learning rather than geometry.
+
+### Constraint-Guided SDEdit Results (SPRITE_CONSTRAINT_ALPHA=0.05)
+
+Output: `outputs/paradigm_a_visible_v1/segment_rollout_constrained_a0.05/` — 626 visible triplets.
+
+| Metric | Baseline (AE pos) | Constraint α=0.05 |
+|---|---|---|
+| Image MSE ↓ | 0.00291 | 0.00291 |
+| Crop MSE (diffusion) ↓ | 0.0470 | **0.0459** |
+| Crop MSE (mean sprite) ↓ | 0.0427 | 0.0427 |
+| Detection rate ↑ | 1.000 | 1.000 |
+| Centroid err/pred (px) ↓ | 1.999 | **1.682** |
+| Centroid err/true (px) ↓ | 14.734 | 14.773 |
+
+**Findings:**
+
+- **Constraint works as intended.** Sprite centroid offset within the 32×32 frame drops from 2.00px → 1.68px. The gradient nudge is pulling the lander toward center, which is exactly C(y, f) being actively satisfied rather than trivially constructed.
+- **No effect on true-position error.** Centroid err/true stays at ~14.7px — expected, since the constraint only centers the sprite within its own frame, not the paste position. Position accuracy is bounded by the AE physical encoder (y R²=0.302).
+- **Minor crop MSE improvement.** 0.0470 → 0.0459 from better sprite centering. Not meaningful on its own; the position bottleneck dominates.
+- **Next step to make the constraint matter more:** fix the position bottleneck (more data, more epochs on physical encoder, or oracle-guided training). With accurate positions, a well-centered sprite would give meaningful C(y, f) satisfaction.
